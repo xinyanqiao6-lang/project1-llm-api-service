@@ -1,0 +1,25 @@
+# 一键起两个容器：API 服务 + Redis（缓存/限流的后端）
+# 用法：docker compose up --build
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
+      - SILICONFLOW_BASE_URL=${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
+      - MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - REDIS_URL=redis://redis:6379/0
+      - MOCK_MODE=${MOCK_MODE:-false}
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
