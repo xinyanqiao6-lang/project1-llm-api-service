@@ -11,6 +11,7 @@ import json
 import time
 import uuid
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -70,16 +71,18 @@ async def health():
         "model": config.MODEL,
         "mock_mode": config.MOCK_MODE,
         "cache_backend": cache.stats()["backend"],
+        "circuit": llm_client.breaker.stats(),
         "timestamp": time.time(),
     }
 
 
 @app.get("/stats")
 async def stats():
-    """压测后看这里：缓存命中率、限流拒绝数，抄进《项目指标跟踪表》。"""
+    """压测后看这里：缓存命中率、限流拒绝数、熔断器状态，抄进《项目指标跟踪表》。"""
     return {
         "cache": cache.stats(),
         "rate_limit": limiter.stats(),
+        "circuit_breaker": llm_client.breaker.stats(),
     }
 
 
@@ -135,9 +138,31 @@ async def chat_completions(body: ChatRequest, request: Request):
 
         return StreamingResponse(stream_and_cache(), media_type="text/event-stream")
 
-    content = await llm_client.chat_completion(
-        messages, body.temperature, body.max_tokens
-    )
+    # 3) 未命中 -> 调上游（带超时/重试/熔断，失败返回 503 而不是 500 崩溃）
+    try:
+        content = await llm_client.chat_completion(
+            messages, body.temperature, body.max_tokens
+        )
+    except llm_client.UpstreamUnavailableError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "上游服务暂时不可用（熔断中），请稍后重试",
+                    "type": "upstream_unavailable",
+                }
+            },
+        )
+    except httpx.TimeoutException:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "上游服务超时，请稍后重试",
+                    "type": "upstream_timeout",
+                }
+            },
+        )
     cache.set(cache_key, content)
     return _full_response(req_id, model, content)
 

@@ -12,10 +12,12 @@ flowchart LR
     RL -->|超限| R429[429 Too Many Requests]
     RL -->|放行| CH{缓存查询<br/>Redis / 内存回退}
     CH -->|命中| RESP[直接返回<br/>省一次推理]
-    CH -->|未命中| SF[硅基流动 API<br/>OpenAI 兼容]
+    CH -->|未命中| CB{熔断器<br/>closed/open/half-open}
+    CB -->|打开| R503[503 快速失败<br/>不拖垮网关]
+    CB -->|放行| SF[硅基流动 API<br/>超时30s + 指数退避重试]
     SF -->|SSE 流式透传| RESP
     SF -->|写缓存 TTL=3600s| CH
-    GW -->|GET /health /stats| MON[运行指标]
+    GW -->|GET /health /stats| MON[运行指标<br/>含熔断器状态]
 ```
 
 ## 快速开始
@@ -74,10 +76,10 @@ python scripts/load_test.py --url http://127.0.0.1:8000 --concurrency 10 --durat
 project1-llm-api-service/
 ├── app/
 │   ├── config.py       # 配置（环境变量读取）
-│   ├── llm_client.py   # 硅基流动客户端（非流式 + SSE 流式）
+│   ├── llm_client.py   # 硅基流动客户端（非流式 + SSE 流式 + 超时/重试/熔断）
 │   ├── cache.py        # Redis 缓存 + 内存回退（含命中率统计）
 │   ├── ratelimit.py    # 滑动窗口限流（Redis ZSET 实现）
-│   └── main.py         # FastAPI：/v1/chat/completions、/health、/stats
+│   └── main.py         # FastAPI：/v1/chat/completions、/health、/stats（含熔断状态）
 ├── scripts/
 │   ├── basic_call.py   # Day1-2 基础调用脚本
 │   └── load_test.py    # Day9-10 压测脚本（QPS/P50/P95/P99）
@@ -94,6 +96,8 @@ project1-llm-api-service/
 3. **SSE vs WebSocket？** → SSE 单向（服务器→客户端）、基于 HTTP、自动重连、够用且简单；WebSocket 双向、适合聊天室类实时互推
 4. **为什么用云 API 不自部署 vLLM？** → 成本（GPU 按秒计费 vs API 按量）、运维（不用管显存/驱动/推理框架）、弹性；代价是数据出域与网络延迟
 5. **缓存一致性？** → TTL 过期自然失效；进阶可做主动失效（源数据更新时删 key）
+6. **熔断器三态是什么？为什么需要？** → `llm_client.py` 的 CircuitBreaker：closed 正常放行 → 连续失败达阈值转 open（冷却期内快速失败，隔离故障防雪崩）→ 冷却结束转 half-open（放一个探测请求，成功回 closed、失败回 open）。配合超时收紧 + 指数退避重试，把冷路径 P99 从 60s 离群值压到 3.76s（降 94%）
+7. **重试为什么用指数退避？** → 固定间隔重试会在上游过载时形成"重试风暴"雪上加霜；指数退避（0.5s→1s→2s）让重试节奏越来越慢，给上游喘息时间
 
 ## 提交到 GitHub（≥5 commits 建议）
 
