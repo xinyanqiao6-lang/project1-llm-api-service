@@ -11,12 +11,15 @@
 """
 import asyncio
 import json
+import logging
 import time
 from typing import AsyncGenerator
 
 import httpx
 
 from . import config
+
+logger = logging.getLogger("llm_client")
 
 _client: httpx.AsyncClient | None = None
 
@@ -74,6 +77,8 @@ class CircuitBreaker:
         return True
 
     def record_success(self):
+        if self._state != "closed":
+            logger.info("熔断器恢复：%s -> closed", self._state)
         self._consecutive_failures = 0
         self._state = "closed"
         self._probing = False
@@ -83,9 +88,14 @@ class CircuitBreaker:
         self._probing = False
         if self._state == "half-open":
             # 探测失败 -> 立即重新 open
+            logger.warning("熔断器探测失败，重新 open（连续失败 %d）", self._consecutive_failures)
             self._state = "open"
             self._opened_at = time.monotonic()
         elif self._consecutive_failures >= self.fail_threshold:
+            logger.warning(
+                "熔断器打开：连续失败 %d 次达到阈值 %d",
+                self._consecutive_failures, self.fail_threshold,
+            )
             self._state = "open"
             self._opened_at = time.monotonic()
 
@@ -131,7 +141,9 @@ def _should_retry(status_code: int | None) -> bool:
 
 async def _wait_before_retry(attempt: int):
     """指数退避：0.5s -> 1s -> 2s ..."""
-    await _sleep(config.LLM_RETRY_BACKOFF * (2 ** attempt))
+    delay = config.LLM_RETRY_BACKOFF * (2 ** attempt)
+    logger.warning("上游调用失败，第 %d 次重试，退避 %.1fs", attempt + 1, delay)
+    await _sleep(delay)
 
 
 # ---------- 真实调用 ----------

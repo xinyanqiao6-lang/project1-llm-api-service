@@ -58,6 +58,13 @@ python scripts/load_test.py --url http://127.0.0.1:8000 --concurrency 10 --durat
 ```
 结果自动写入 `results/*.json`，把 QPS / P95 / P99 / 缓存命中率**抄进《项目指标跟踪表》**。
 
+### 6) 跑单元测试（18 个用例）
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+覆盖缓存 key 生成、三态熔断器状态机、滑动窗口限流、API 冒烟测试。全部不依赖真实 Redis / 真实 API，可离线跑。
+
 ## 指标怎么测（对应跟踪表）
 
 | 简历指标 | 怎么测 | 数据来源 |
@@ -83,9 +90,15 @@ project1-llm-api-service/
 ├── scripts/
 │   ├── basic_call.py   # Day1-2 基础调用脚本
 │   └── load_test.py    # Day9-10 压测脚本（QPS/P50/P95/P99）
+├── tests/
+│   ├── test_cache.py          # 缓存 key 生成（确定性/区分度）
+│   ├── test_circuit_breaker.py# 三态熔断器状态机
+│   ├── test_ratelimit.py      # 滑动窗口限流
+│   └── test_api.py            # /health /stats 冒烟测试
 ├── Dockerfile          # Day7-8 容器化
 ├── docker-compose.yml  # 一键起 API + Redis
-├── requirements.txt
+├── requirements.txt    # 生产依赖
+├── requirements-dev.txt# 开发/测试依赖（pytest）
 └── .env.example        # 复制为 .env 填 Key（.gitignore 已排除）
 ```
 

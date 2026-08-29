@@ -8,8 +8,10 @@
 链路：客户端 -> 限流 -> 缓存查询 -> (未命中) 调硅基流动 -> 写缓存 -> 返回
 """
 import json
+import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
@@ -20,10 +22,24 @@ from . import config, llm_client
 from .cache import cache
 from .ratelimit import limiter
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("gateway")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await llm_client.close_client()  # 优雅关闭：释放 httpx 连接池
+
+
 app = FastAPI(
     title="LLM API Gateway",
     description="硅基流动 API 封装：OpenAI 兼容接口 + Redis 缓存 + 滑动窗口限流",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -91,6 +107,7 @@ async def chat_completions(body: ChatRequest, request: Request):
     # 1) 限流（滑动窗口）
     allowed, current = limiter.allow(client_id_of(request))
     if not allowed:
+        logger.warning("限流拒绝：client=%s current=%d", client_id_of(request), current)
         return JSONResponse(
             status_code=429,
             content={
@@ -144,6 +161,7 @@ async def chat_completions(body: ChatRequest, request: Request):
             messages, body.temperature, body.max_tokens
         )
     except llm_client.UpstreamUnavailableError:
+        logger.error("上游熔断中，返回 503")
         return JSONResponse(
             status_code=503,
             content={
@@ -154,6 +172,7 @@ async def chat_completions(body: ChatRequest, request: Request):
             },
         )
     except httpx.TimeoutException:
+        logger.error("上游超时（重试耗尽），返回 503")
         return JSONResponse(
             status_code=503,
             content={
@@ -178,8 +197,3 @@ def _full_response(req_id: str, model: str, content: str) -> dict:
         ],
         "usage": None,  # 上游 usage 透传可作扩展点
     }
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    await llm_client.close_client()
