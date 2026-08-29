@@ -4,6 +4,7 @@
 - POST /v1/chat/completions  对话接口，支持 stream=true（SSE 流式）
 - GET  /health               健康检查
 - GET  /stats                运行指标：缓存命中 / 限流拒绝 / 模式
+- GET  /v1/models            模型列表（OpenAI 兼容）
 
 链路：客户端 -> 限流 -> 缓存查询 -> (未命中) 调硅基流动 -> 写缓存 -> 返回
 """
@@ -99,6 +100,22 @@ async def stats():
         "cache": cache.stats(),
         "rate_limit": limiter.stats(),
         "circuit_breaker": llm_client.breaker.stats(),
+    }
+
+
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI 兼容的模型列表接口，方便标准客户端 / 前端下拉直接接入。"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": config.MODEL,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "siliconflow",
+            }
+        ],
     }
 
 

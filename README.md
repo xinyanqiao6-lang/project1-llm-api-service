@@ -17,7 +17,7 @@ flowchart LR
     CB -->|放行| SF[硅基流动 API<br/>超时30s + 指数退避重试]
     SF -->|SSE 流式透传| RESP
     SF -->|写缓存 TTL=3600s| CH
-    GW -->|GET /health /stats| MON[运行指标<br/>含熔断器状态]
+    GW -->|GET /health /stats /v1/models| MON[运行指标<br/>含熔断器状态]
 ```
 
 ## 快速开始
@@ -86,7 +86,7 @@ project1-llm-api-service/
 │   ├── llm_client.py   # 硅基流动客户端（非流式 + SSE 流式 + 超时/重试/熔断）
 │   ├── cache.py        # Redis 缓存 + 内存回退（含命中率统计）
 │   ├── ratelimit.py    # 滑动窗口限流（Redis ZSET 实现）
-│   └── main.py         # FastAPI：/v1/chat/completions、/health、/stats（含熔断状态）
+│   └── main.py         # FastAPI：/v1/chat/completions、/v1/models、/health、/stats（含熔断状态）
 ├── scripts/
 │   ├── basic_call.py   # Day1-2 基础调用脚本
 │   └── load_test.py    # Day9-10 压测脚本（QPS/P50/P95/P99）
@@ -111,6 +111,13 @@ project1-llm-api-service/
 5. **缓存一致性？** → TTL 过期自然失效；进阶可做主动失效（源数据更新时删 key）
 6. **熔断器三态是什么？为什么需要？** → `llm_client.py` 的 CircuitBreaker：closed 正常放行 → 连续失败达阈值转 open（冷却期内快速失败，隔离故障防雪崩）→ 冷却结束转 half-open（放一个探测请求，成功回 closed、失败回 open）。配合超时收紧 + 指数退避重试，把冷路径 P99 从 60s 离群值压到 3.76s（降 94%）
 7. **重试为什么用指数退避？** → 固定间隔重试会在上游过载时形成"重试风暴"雪上加霜；指数退避（0.5s→1s→2s）让重试节奏越来越慢，给上游喘息时间
+
+## 设计取舍（面试加分：体现工程判断力）
+
+- **Redis 缓存 vs 纯内存**：选 Redis 是因为多实例部署时内存缓存无法共享、重启即丢、且难做统一淘汰；代价是多一次网络往返。实测 Redis 命中 P50 28.7ms，仍比上游推理快两个数量级，网络往返可忽略——用"分布式能力"换"微秒级延迟"是划算的。
+- **缓存键用 SHA256 而非原文**：请求体可能含敏感内容，哈希后既不泄露原文、又固定长度、且确定性可复现（同一问题永远命中同一 key）。
+- **上游韧性三层而非单层**：只加超时会"卡等 30s 才失败"；只加重试会在上游过载时形成重试风暴；只加熔断会误杀正常请求。超时（快速失败）+ 指数退避重试（给上游喘息）+ 三态熔断（隔离持续故障）三者正交互补，缺一不可。
+- **用云 API 而非自部署 vLLM**：成本（GPU 按秒 vs API 按量）、运维（显存/驱动/推理框架）、弹性；代价是数据出域与网络延迟——对简历项目是合理取舍。
 
 ## 提交到 GitHub（≥5 commits 建议）
 

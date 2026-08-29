@@ -23,3 +23,12 @@ def test_stats():
     assert "rate_limit" in body
     assert "circuit_breaker" in body
     assert body["circuit_breaker"]["state"] in ("closed", "open", "half-open")
+
+
+def test_list_models():
+    r = client.get("/v1/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    assert isinstance(body["data"], list) and len(body["data"]) >= 1
+    assert body["data"][0]["id"]  # 返回已配置的模型名（OpenAI 兼容）
