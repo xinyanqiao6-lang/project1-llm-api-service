@@ -28,7 +28,12 @@ def get_client() -> httpx.AsyncClient:
     global _client
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=config.LLM_CONNECT_TIMEOUT)
+            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=config.LLM_CONNECT_TIMEOUT),
+            # trust_env=False：不走系统代理。走代理会给每次调用叠加不确定的
+            # 代理排队延迟，压测出来的 P99 就不代表本服务的真实表现；
+            # 且部分本机代理对 absolute-URI 请求直接回 404。
+            # 需要走代理时设环境变量 UPSTREAM_TRUST_ENV=true。
+            trust_env=config.UPSTREAM_TRUST_ENV,
         )
     return _client
 

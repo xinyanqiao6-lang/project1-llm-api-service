@@ -33,4 +33,10 @@ CIRCUIT_COOLDOWN = float(os.getenv("CIRCUIT_COOLDOWN", "30"))  # 熔断冷却期
 # MOCK_MODE=true 时不调真实 API，返回固定文本——用于没有 Key 时先跑通全链路。
 # ⚠️ Mock 模式压测出的数字只能验证链路，不能写进简历！
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ("1", "true", "yes")
+# 调上游是否信任环境变量里的代理（HTTP_PROXY/HTTPS_PROXY）。
+# 默认 False = 直连，原因有两个：
+#   1) 测量干净：走代理会给每次调用叠加不确定的代理延迟与排队，P99 完全不可信；
+#   2) 防劫持：某些本机代理对 absolute-URI 请求直接回 404。
+# 如果你的网络必须靠代理才能访问硅基流动，把这个设为 true。
+UPSTREAM_TRUST_ENV = os.getenv("UPSTREAM_TRUST_ENV", "false").lower() in ("1", "true", "yes")
 PORT = int(os.getenv("PORT", "8000"))
