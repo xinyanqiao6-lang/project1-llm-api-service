@@ -163,6 +163,7 @@ project1-llm-api-service/
 │   ├── cache.py        # Redis 缓存 + 内存回退（含命中率统计）
 │   ├── ratelimit.py    # 滑动窗口限流（Redis ZSET 实现）
 │   ├── metrics.py      # 指标口径 + 可信度判定（数字能不能写进简历）
+│   ├── observability.py # v2：trace 落库(SQLite) + token 成本 + 模型分级路由
 │   └── main.py         # FastAPI：/v1/chat/completions、/v1/models、/health、/stats
 ├── scripts/
 │   ├── basic_call.py     # 基础调用脚本
@@ -212,6 +213,28 @@ project1-llm-api-service/
   `python scripts/measure_suite.py`，台账中「后端」列显示 `redis` 的行才可引用。
 - ❌ 任何 `MOCK_MODE` 下的数字。
 - ❌ 早期 v1 结果（已归档至 `results/archive_v1_legacy/`）。
+
+## v2：可观测与成本路由
+
+v1 只有 `/stats` 给累计计数，回答不了三个运维必答的问题。v2 补上：
+
+| 问题 | v1 | v2 |
+|---|---|---|
+| 单个请求发生了什么 | 只能看日志 | `GET /traces/recent` 逐条 trace（分段耗时/token/缓存/重试/熔断状态） |
+| 这个月花了多少钱 | 算不出来 | `/stats` 的 `trace` 段：总 token、按模型分组、成本 |
+| 哪些请求能走便宜模型 | 做不了决策 | 模型分级路由（可解释，路由依据写进 trace） |
+
+```bash
+curl http://127.0.0.1:8000/stats          # 含 trace 聚合
+curl http://127.0.0.1:8000/traces/recent  # 最近 20 条请求明细
+```
+
+**成本口径刻意保守**：未配置单价的模型返回 `cost_estimated: false`，
+而不是假装成本为 0——「算不出来」和「不要钱」是两回事。
+
+**路由规则可解释**：客户端指定模型就尊重客户端；`max_tokens<=64` 的简单请求走
+`CHEAP_MODEL`，其余走 `STRONG_MODEL`，依据（`simple` / `complex` / `client-specified`）
+会写进响应的 `x_gateway.routed_by` 与 trace，线上出问题能倒查"为什么走了这个模型"。
 
 ## 面试必考题速查（代码里都埋了参考答法）
 

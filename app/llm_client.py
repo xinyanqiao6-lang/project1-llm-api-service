@@ -153,11 +153,17 @@ async def _wait_before_retry(attempt: int):
 
 # ---------- 真实调用 ----------
 
-async def chat_completion(messages: list, temperature: float = 0.7,
-                           max_tokens: int = 1024) -> str:
-    """非流式：一次请求返回完整回复文本（带超时 + 重试 + 熔断）。"""
+async def chat_completion_with_usage(messages: list, temperature: float = 0.7,
+                                    max_tokens: int = 1024) -> tuple[str, dict, int]:
+    """非流式：一次请求返回 (回复文本, usage, 重试次数)。
+
+    v2 新增：把 usage 与重试次数一并返回。理由——没有 token 记账就没有成本可见性，
+    而「这次调用花了多少钱、重试了几次」是网关最基本的两条运维指标。
+    兼容做法：保留 chat_completion() 只返回文本，旧调用方无需改动。
+    """
     if config.MOCK_MODE or not config.API_KEY:
-        return await mock_chat(messages, temperature, max_tokens)
+        return await mock_chat(messages, temperature, max_tokens), \
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, 0
 
     payload = {
         "model": config.MODEL,
@@ -166,6 +172,7 @@ async def chat_completion(messages: list, temperature: float = 0.7,
         "max_tokens": max_tokens,
     }
 
+    retries = 0
     for attempt in range(config.LLM_MAX_RETRIES + 1):
         if not breaker.allow():
             raise UpstreamUnavailableError("circuit breaker open")
@@ -180,20 +187,35 @@ async def chat_completion(messages: list, temperature: float = 0.7,
             # 超时 / 网络层错误：记录失败，重试
             breaker.record_failure()
             if attempt < config.LLM_MAX_RETRIES:
+                retries += 1
                 await _wait_before_retry(attempt)
                 continue
             raise
 
         if resp.status_code < 400:
             breaker.record_success()
-            return resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            usage = data.get("usage") or {}
+            return data["choices"][0]["message"]["content"], {
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            }, retries
 
         if _should_retry(resp.status_code):
             breaker.record_failure()
             if attempt < config.LLM_MAX_RETRIES:
+                retries += 1
                 await _wait_before_retry(attempt)
                 continue
         resp.raise_for_status()  # 4xx 或重试耗尽后的 5xx
+
+
+async def chat_completion(messages: list, temperature: float = 0.7,
+                          max_tokens: int = 1024) -> str:
+    """兼容旧调用方：只要文本。"""
+    text, _, _ = await chat_completion_with_usage(messages, temperature, max_tokens)
+    return text
 
 
 async def chat_completion_stream(messages: list, temperature: float = 0.7,

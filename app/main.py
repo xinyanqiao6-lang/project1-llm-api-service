@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import config, llm_client
 from .cache import cache
+from .observability import RequestTrace, compute_cost, route_model, store
 from .ratelimit import limiter
 
 logging.basicConfig(
@@ -95,12 +96,23 @@ async def health():
 
 @app.get("/stats")
 async def stats():
-    """压测后看这里：缓存命中率、限流拒绝数、熔断器状态，抄进《项目指标跟踪表》。"""
+    """运行指标总览。
+
+    v2 把 trace 聚合并进来——v1 只有累计计数，无法回答两个关键问题：
+    「单个请求到底发生了什么」和「这个月花了多少钱」。
+    """
     return {
         "cache": cache.stats(),
         "rate_limit": limiter.stats(),
         "circuit_breaker": llm_client.breaker.stats(),
+        "trace": store.aggregate(),
     }
+
+
+@app.get("/traces/recent")
+async def traces_recent(n: int = 20):
+    """最近 n 条请求 trace——排查慢请求、定位问题用。"""
+    return {"traces": store.recent(n)}
 
 
 @app.get("/v1/models")
@@ -121,10 +133,21 @@ async def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(body: ChatRequest, request: Request):
+    t_start = time.perf_counter()
+    client = client_id_of(request)
+
+    # 0) trace 骨架：无论成功、缓存命中还是失败都会落一条，便于事后定位
+    tr = RequestTrace(request_id=f"chatcmpl-{uuid.uuid4().hex[:12]}", client=client,
+                      stream=body.stream)
+
     # 1) 限流（滑动窗口）
-    allowed, current = limiter.allow(client_id_of(request))
+    allowed, current = limiter.allow(client)
     if not allowed:
-        logger.warning("限流拒绝：client=%s current=%d", client_id_of(request), current)
+        logger.warning("限流拒绝：client=%s current=%d", client, current)
+        tr.status = 429
+        tr.breaker_state = llm_client.breaker.state
+        tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+        store.write(tr)
         return JSONResponse(
             status_code=429,
             content={
@@ -136,49 +159,95 @@ async def chat_completions(body: ChatRequest, request: Request):
             },
         )
 
-    model = body.model or config.MODEL
+    # 1.5) 模型分级路由：客户端没指定模型时，按请求复杂度自动选模型。
+    # 可解释优先——路由依据会写进 trace，出问题能倒查"为什么走了这个模型"。
+    if config.ENABLE_MODEL_ROUTING:
+        model, route_reason = route_model(body.model, body.max_tokens, body.messages)
+        tr.routed_from = body.model or ""
+    else:
+        model, route_reason = (body.model or config.MODEL), "routing-disabled"
+    tr.model = model
+
     messages = [m.model_dump() for m in body.messages]
-    req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    req_id = tr.request_id
 
     # 2) 缓存查询（流式/非流式共用）
     cache_key = cache.make_key(model, messages, body.temperature)
     cached = cache.get(cache_key)
+    tr.cache_hit = cached is not None
+    tr.cache_backend = cache.stats()["backend"]
     if cached is not None:
         if body.stream:
             # 命中缓存也走流式返回：把整段文本切块吐出去，保持接口行为一致
             async def replay():
                 for i in range(0, len(cached), 16):
-                    yield sse_chunk(req_id, model, cached[i : i + 16])
+                    yield sse_chunk(req_id, model, cached[i: i + 16])
                 yield sse_chunk(req_id, model, finish_reason="stop")
                 yield "data: [DONE]\n\n"
 
+            tr.status = 200
+            tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+            store.write(tr)
             return StreamingResponse(replay(), media_type="text/event-stream")
+
+        tr.status = 200
+        tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+        tr.breaker_state = llm_client.breaker.state
+        store.write(tr)
         return _full_response(req_id, model, cached)
 
-    # 3) 未命中 -> 调上游
+    # 3) 未命中 -> 调上游（流式）
     if body.stream:
+        t_llm = time.perf_counter()
+
         async def stream_and_cache():
             parts: list[str] = []
-            async for chunk in llm_client.chat_completion_stream(
-                messages, body.temperature, body.max_tokens
-            ):
-                parts.append(chunk)
-                yield sse_chunk(req_id, model, chunk)
+            try:
+                async for chunk in llm_client.chat_completion_stream(
+                    messages, body.temperature, body.max_tokens
+                ):
+                    parts.append(chunk)
+                    yield sse_chunk(req_id, model, chunk)
+            except Exception as e:              # noqa: BLE001
+                # 流已开始无法改状态码，但必须把失败落 trace，否则这次调用就消失了
+                tr.status = 502
+                tr.error = f"{type(e).__name__}: {e}"
+                tr.t_llm_ms = (time.perf_counter() - t_llm) * 1000
+                tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+                tr.breaker_state = llm_client.breaker.state
+                store.write(tr)
+                raise
             full = "".join(parts)
             if full:
                 cache.set(cache_key, full)  # 流结束后写缓存
             yield sse_chunk(req_id, model, finish_reason="stop")
             yield "data: [DONE]\n\n"
+            tr.status = 200
+            tr.t_llm_ms = (time.perf_counter() - t_llm) * 1000
+            tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+            tr.breaker_state = llm_client.breaker.state
+            tr.completion_tokens = len(full) // 3   # 粗估：流式拿不到 usage
+            tr.total_tokens = tr.completion_tokens
+            tr.cost_cny, tr.cost_estimated = compute_cost(
+                model, tr.prompt_tokens, tr.completion_tokens)
+            store.write(tr)
 
         return StreamingResponse(stream_and_cache(), media_type="text/event-stream")
 
     # 3) 未命中 -> 调上游（带超时/重试/熔断，失败返回 503 而不是 500 崩溃）
+    t_llm = time.perf_counter()
     try:
-        content = await llm_client.chat_completion(
+        content, usage, retries = await llm_client.chat_completion_with_usage(
             messages, body.temperature, body.max_tokens
         )
     except llm_client.UpstreamUnavailableError:
         logger.error("上游熔断中，返回 503")
+        tr.status = 503
+        tr.error = "circuit breaker open"
+        tr.t_llm_ms = (time.perf_counter() - t_llm) * 1000
+        tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+        tr.breaker_state = llm_client.breaker.state
+        store.write(tr)
         return JSONResponse(
             status_code=503,
             content={
@@ -190,6 +259,12 @@ async def chat_completions(body: ChatRequest, request: Request):
         )
     except httpx.TimeoutException:
         logger.error("上游超时（重试耗尽），返回 503")
+        tr.status = 503
+        tr.error = "upstream timeout after retries"
+        tr.t_llm_ms = (time.perf_counter() - t_llm) * 1000
+        tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+        tr.breaker_state = llm_client.breaker.state
+        store.write(tr)
         return JSONResponse(
             status_code=503,
             content={
@@ -199,8 +274,37 @@ async def chat_completions(body: ChatRequest, request: Request):
                 }
             },
         )
+
+    # 4) 成功：记账（token / 成本 / 分段耗时 / 重试次数）后落 trace
     cache.set(cache_key, content)
-    return _full_response(req_id, model, content)
+    tr.status = 200
+    tr.retries = retries
+    tr.prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    tr.completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    tr.total_tokens = int(usage.get("total_tokens", 0) or 0)
+    tr.cost_cny, tr.cost_estimated = compute_cost(
+        model, tr.prompt_tokens, tr.completion_tokens)
+    tr.t_llm_ms = (time.perf_counter() - t_llm) * 1000
+    tr.t_total_ms = (time.perf_counter() - t_start) * 1000
+    tr.breaker_state = llm_client.breaker.state
+    store.write(tr)
+
+    resp = _full_response(req_id, model, content)
+    # 把 usage 与路由信息带回给客户端（OpenAI 兼容字段），方便客户端侧核算
+    resp["usage"] = {
+        "prompt_tokens": tr.prompt_tokens,
+        "completion_tokens": tr.completion_tokens,
+        "total_tokens": tr.total_tokens,
+    }
+    resp["x_gateway"] = {
+        "routed_by": route_reason,
+        "cost_cny": tr.cost_cny,
+        "cost_estimated": tr.cost_estimated,
+        "retries": retries,
+        "cache_hit": False,
+        "trace_id": req_id,
+    }
+    return resp
 
 
 def _full_response(req_id: str, model: str, content: str) -> dict:

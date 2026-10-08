@@ -40,3 +40,9 @@ MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ("1", "true", "yes")
 # 如果你的网络必须靠代理才能访问硅基流动，把这个设为 true。
 UPSTREAM_TRUST_ENV = os.getenv("UPSTREAM_TRUST_ENV", "false").lower() in ("1", "true", "yes")
 PORT = int(os.getenv("PORT", "8000"))
+
+# ---- 可观测与路由（v2 新增）----
+ENABLE_MODEL_ROUTING = os.getenv("ENABLE_MODEL_ROUTING", "false").lower() in ("1", "true", "yes")
+CHEAP_MODEL = os.getenv("CHEAP_MODEL", "Qwen/Qwen2.5-7B-Instruct")   # 简单请求走它
+STRONG_MODEL = os.getenv("STRONG_MODEL", "deepseek-ai/DeepSeek-V3")  # 复杂请求走它
+TRACE_DB = os.getenv("TRACE_DB", "data/traces.db")                    # trace 落库位置
