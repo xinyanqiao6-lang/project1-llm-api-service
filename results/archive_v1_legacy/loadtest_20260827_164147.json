@@ -1,0 +1,32 @@
+{
+  "time": "2026-08-27 16:41:47",
+  "target": "http://127.0.0.1:8766",
+  "concurrency": 20,
+  "duration_s": 5,
+  "stream": false,
+  "total_requests": 3109,
+  "success": 3109,
+  "failed": 0,
+  "QPS": 621.8,
+  "latency_ms": {
+    "avg": 31.5,
+    "P50": 11.9,
+    "P95": 113.2,
+    "P99": 193.7
+  },
+  "server_stats": {
+    "cache": {
+      "backend": "in-memory(fallback)",
+      "hits": 3086,
+      "misses": 23,
+      "hit_rate": 0.9926
+    },
+    "rate_limit": {
+      "algorithm": "sliding-window",
+      "backend": "in-memory(fallback)",
+      "limit": 100000,
+      "window_seconds": 60,
+      "rejected_total": 0
+    }
+  }
+}

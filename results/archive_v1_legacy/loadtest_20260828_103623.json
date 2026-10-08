@@ -1,0 +1,32 @@
+{
+  "time": "2026-08-28 10:36:23",
+  "target": "http://127.0.0.1:8000",
+  "concurrency": 10,
+  "duration_s": 15,
+  "stream": false,
+  "total_requests": 168,
+  "success": 167,
+  "failed": 1,
+  "QPS": 11.2,
+  "latency_ms": {
+    "avg": 1306.0,
+    "P50": 19.2,
+    "P95": 3232.6,
+    "P99": 4245.1
+  },
+  "server_stats": {
+    "cache": {
+      "backend": "redis",
+      "hits": 174,
+      "misses": 171,
+      "hit_rate": 0.5043
+    },
+    "rate_limit": {
+      "algorithm": "sliding-window",
+      "backend": "redis",
+      "limit": 100000,
+      "window_seconds": 60,
+      "rejected_total": 0
+    }
+  }
+}

@@ -1,6 +1,18 @@
 .env
 __pycache__/
 *.pyc
-results/
 .venv/
 data/
+
+# results/ 下的压测产物默认不入库（体积大、且多为不可引用的中间轮次）。
+# 但以下两类**证据文件**必须入库，否则简历上的压测数字在 GitHub 上无法自证：
+#   - METRICS.md              自动生成的可信度台账（决定哪些数字能写进简历）
+#   - archive_v1_legacy/      v1 阶段经核验的真 Redis 原始轮次 + 作废说明
+results/*
+!results/METRICS.md
+!results/archive_v1_legacy/
+!results/archive_v1_legacy/**
+
+# 仍被忽略的示例：
+#   results/loadtest_*_partial.json   v2 中间轮次，后端为内存回退，不可引用
+#   results/*.db、traces/             运行时产物
