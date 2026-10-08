@@ -163,6 +163,7 @@ project1-llm-api-service/
 │   ├── cache.py        # Redis 缓存 + 内存回退（含命中率统计）
 │   ├── ratelimit.py    # 滑动窗口限流（Redis ZSET 实现）
 │   ├── metrics.py      # 指标口径 + 可信度判定（数字能不能写进简历）
+│   ├── observability.py# ★ v2：请求 trace 落库 + token 成本记账 + 模型分级路由
 │   ├── observability.py # v2：trace 落库(SQLite) + token 成本 + 模型分级路由
 │   └── main.py         # FastAPI：/v1/chat/completions、/v1/models、/health、/stats
 ├── scripts/
@@ -235,6 +236,46 @@ curl http://127.0.0.1:8000/traces/recent  # 最近 20 条请求明细
 **路由规则可解释**：客户端指定模型就尊重客户端；`max_tokens<=64` 的简单请求走
 `CHEAP_MODEL`，其余走 `STRONG_MODEL`，依据（`simple` / `complex` / `client-specified`）
 会写进响应的 `x_gateway.routed_by` 与 trace，线上出问题能倒查"为什么走了这个模型"。
+
+## v2 新增：可观测与成本可见性
+
+v1 只有 `/stats` 给累计计数，回答不了三个运维必答的问题：
+**单个请求发生了什么**、**这个月花了多少钱**、**哪些请求可以走便宜模型**。
+
+v2 补齐这三块：
+
+| 能力 | 实现 | 端点 |
+|---|---|---|
+| 请求级 trace | 每次调用落一条 SQLite 记录：分段耗时、token、缓存命中、重试次数、熔断状态、错误 | `GET /traces/recent?n=20` |
+| 成本记账 | 按模型单价算成本，未配置单价标 `cost_estimated:false`（**不假装免费**） | `GET /stats` → `trace` |
+| 模型分级路由 | 客户端未指定模型时，简单请求走便宜模型、复杂请求走强模型，**路由依据写进 trace 可倒查** | `POST /v1/chat/completions` |
+| 聚合看板 | 延迟 P50/P95/P99、缓存命中率、平均 token、按模型分组的请求数与成本 | `GET /stats` → `trace` |
+
+响应体也会回带网关自己的元信息（OpenAI 兼容的 `usage` + 扩展的 `x_gateway`）：
+```json
+{
+  "usage": {"prompt_tokens": 412, "completion_tokens": 96, "total_tokens": 508},
+  "x_gateway": {"routed_by": "simple(len<=64)", "cost_cny": 0.0,
+                "cost_estimated": true, "retries": 0, "cache_hit": false,
+                "trace_id": "chatcmpl-..."}
+}
+```
+
+### 设计上刻意做的两个取舍
+
+1. **未知单价的模型不假装成本为 0**，而是 `cost_estimated: false`。
+   把"算不出来"标成"免费"，是成本可视化里最常见的自欺。
+2. **流式请求失败也必须落 trace**。流已开始无法改状态码，
+   如果异常直接抛出，这次调用就会在监控里**凭空消失**——
+   越是失败得悄无声息的请求，越需要被记录。
+
+配置项：
+```bash
+ENABLE_MODEL_ROUTING=true      # 开启模型分级路由
+CHEAP_MODEL=Qwen/Qwen2.5-7B-Instruct
+STRONG_MODEL=deepseek-ai/DeepSeek-V3
+TRACE_DB=data/traces.db
+```
 
 ## 面试必考题速查（代码里都埋了参考答法）
 
